@@ -1,0 +1,219 @@
+---
+title: "GP_News_Popularity_Forcasting"
+author: "Qianhao Fang"
+date: "2021/12/10"
+output: html_document
+---
+
+```{r}
+# imporat packages
+pacman::p_load(dplyr, recipes, caret, ranger, vip, pdp, ggplot2, gbm, caret)
+```
+
+```{r}
+news <- read.csv("OnlineNewsPopularity_label.csv")
+news <- news[, c(1:37, 60)]
+news$popularity <- factor(news$popularity, levels = c("Very Poor", "Poor", "Average", "Good", "Very Good", "Excellent", "Exceptional"))
+for(i in 12:17) {news[,i] <- as.factor(news[,i])}
+for(j in 30:37) {news[,j] <- as.factor(news[,j])}
+news <- news[-31038,]
+head(news)
+str(news)
+```
+
+```{r}
+news %>% apply(2, function(x) sum(is.na(x)))
+```
+
+# 1. sampling
+```{r}
+set.seed(7027)  # for reproducibility
+split <- rsample::initial_split(news, prop = 0.7, strata = "popularity")
+news_train <- rsample::training(split)
+news_test <- rsample::testing(split)
+```
+
+# 2. random forest
+```{r}
+n_features <- length(setdiff(names(news_train), "popularity"))
+system.time(news_rf1 <- ranger(
+  popularity ~ .,
+  data = news_train,
+  mtry = floor(n_features / 3),
+  respect.unordered.factors = "order",
+  seed = 7027
+))
+default_oob <- news_rf1$prediction.error
+default_oob
+```
+
+```{r}
+hyper_grid <- expand.grid(
+  mtry = floor(n_features*c(0.05, 0.15, 0.25, 0.333, 0.4)),
+  min.node.size = c(1, 3, 5, 10),
+  replace = c(TRUE, FALSE),
+  sample.fraction = c(0.5, 0.63, 0.8),
+  oob = NA
+)
+```
+
+```{r}
+for(i in seq_len(nrow(hyper_grid))) {
+  fit <- ranger(
+    formula = popularity ~ .,
+    data = news_train,
+    num.trees = n_features * 10,
+    mtry = hyper_grid$mtry[i],
+    min.node.size = hyper_grid$min.node.size[i],
+    replace = hyper_grid$replace[i],
+    sample.fraction = hyper_grid$sample.fraction[i],
+    verbose = FALSE,
+    seed = 7027,
+    respect.unordered.factors = "order"
+  )
+  hyper_grid$oob[i] <- fit$prediction.error
+  if(i %% 20 == 0) {
+    print(i)
+    print(hyper_grid$oob[i])
+  }
+}
+```
+
+```{r}
+hyper_grid %>% 
+  arrange(oob) %>% 
+  mutate(perc_gain = (default_oob - oob) / default_oob * 100) %>%
+  head(10)
+```
+So the best mtry, min node size and replace sample fraction are 9, 3, TRUE, 0.63. Corresponding oob is 0.4739630.
+
+
+```{r}
+set.seed(7027)
+rf.final <- ranger(
+  popularity ~ .,
+  data = news_train,
+  num.trees = n_features * 10,
+  importance = "impurity",
+  mtry = 9,
+  min.node.size = 3,
+  replace = TRUE,
+  sample.fraction = 0.63,
+  respect.unordered.factors = "order",
+  verbose = FALSE,
+  seed = 7027
+)
+rf.oob <- rf.final$prediction.error
+rf.oob
+```
+
+```{r}
+p1 <- vip::vip(rf.final, num_features = 10, scale = TRUE)
+gridExtra::grid.arrange(p1, nrow = 1)
+```
+
+```{r}
+partial(rf.final, pred.var = "average_token_length", ice = TRUE, center = FALSE, 
+              plot = TRUE, rug = TRUE, alpha = 0.1, plot.engine = "ggplot2", type = "classification", 
+              train = news_train %>% select(-popularity))
+```
+
+```{r}
+rf.final %>%
+  partial(pred.var = "kw_avg_avg", n.trees = rf.final$n.trees, grid.resolution = 100) %>%
+  autoplot(rug = TRUE, train = news_train) +
+  scale_y_continuous()
+```
+
+```{r}
+plot(news$kw_avg_avg, news$popularity)
+```
+
+```{r}
+prediction1 <- predict(rf.final, news_test)
+confusionMatrix(prediction1$predictions, news_test$popularity)
+```
+
+
+# 3. gbm
+```{r}
+set.seed(7027)
+system.time(gbm1 <- gbm(
+  formula = popularity ~ .,
+  data = news_train,
+  n.trees = 300,
+  shrinkage = 0.1,
+  interaction.depth = 3,
+  n.minobsinnode = 10
+))
+```
+
+```{r}
+fitControl <- trainControl(
+  method = "repeatedcv",
+  number = 5,
+  repeats = 1,
+  search="grid"
+)
+```
+
+```{r}
+set.seed(7027)
+system.time(gbmFit1 <- train(
+  popularity ~ ., 
+  data = news_train, 
+  method = "gbm", 
+  trControl = fitControl, 
+  verbose = FALSE
+))
+gbmFit1
+```
+
+
+
+```{r}
+gbmGrid <- expand.grid(interaction.depth = c(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12), 
+                        n.trees = c(30, 60, 90, 120, 150), 
+                        shrinkage = c(0.1, 0.05), 
+                        n.minobsinnode = c(10,20))
+```
+
+```{r}
+set.seed(7027)
+gbm.final <- train(popularity ~ ., data = news_train, 
+                 method = "gbm", 
+                 trControl = fitControl, 
+                 verbose = FALSE, 
+                 ## Now specify the exact models 
+                 ## to evaluate:
+                 tuneGrid = gbmGrid)
+gbm.final
+```
+
+```{r}
+plot(gbm.final)
+```
+
+```{r}
+trellis.par.set(caretTheme())
+plot(gbm.final, metric = "Accuracy", plotType = "level",
+     scales = list(x = list(rot = 90)))
+```
+
+```{r}
+p2 <- vip::vip(gbm.final6, num_features = 10, scale = TRUE)
+gridExtra::grid.arrange(p2, nrow = 1)
+```
+```{r}
+gbm.final6 %>%
+  partial(pred.var = "self_reference_min_shares", n.trees = gbm.final6$n.trees, grid.resolution = 100) %>%
+  autoplot(rug = TRUE, train = news_train) +
+  scale_y_continuous()
+```
+
+```{r}
+prediction2 <- predict(gbm.final6, news_test)
+confusionMatrix(prediction2, news_test$popularity)
+```
+
+

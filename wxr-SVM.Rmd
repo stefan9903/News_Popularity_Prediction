@@ -1,0 +1,145 @@
+---
+title: "SVM"
+author: "wxr"
+date: "2021/12/15"
+output: html_document
+---
+
+```{r}
+# Helper packages
+library(dplyr)      # for data wrangling
+library(ggplot2)    # for awesome graphics
+library(rsample)    # for creating validation splits
+library(recipes)    # for feature engineering
+
+# Modeling packages
+library(caret)       # for fitting KNN models
+library(gmodels)     # Cross Table Function
+library(FNN)
+library(kernlab)   # for fitting SVM linear models
+library(h2o)
+```
+
+
+```{r}
+# read data
+news <- read.csv('OnlineNewsPopularity_label.csv')
+news <- news[, c(1:37, 60)]
+news$popularity <- factor(news$popularity, levels = c("Very Poor", "Poor", "Average", "Good", "Very Good", "Excellent", "Exceptional"))
+for(i in 12:17) {news[,i] <- as.factor(news[,i])}
+for(j in 30:37) {news[,j] <- as.factor(news[,j])}
+news <- news[-31038,]
+head(news)
+```
+
+# 1. sampling
+
+```{r}
+set.seed(7027)  # for reproducibility
+split <- rsample::initial_split(news, prop = 0.7, strata = "popularity")
+news_train <- rsample::training(split)
+news_test <- rsample::testing(split)
+```
+
+# 2. Data Processing
+```{r}
+blueprint_svm <- recipe(popularity ~ ., data = news_train) %>% 
+  step_nzv(all_nominal()) %>% 
+  step_center(all_numeric(), -all_outcomes()) %>% 
+  step_scale(all_numeric(), -all_outcomes()) %>%
+  step_integer(c(12:17,30:37))
+
+prepare <- prep(blueprint_svm, training = news_train)
+
+baked_train <- bake(prepare, new_data = news_train)
+baked_test <- bake(prepare, new_data = news_test)
+```
+
+
+```{r}
+baked_train <- data.frame(baked_train)
+```
+
+# 3. tunning hyperparameter
+```{r}
+library(e1071)
+```
+
+## (1) linear support vector classifier
+
+```{r}
+set.seed(7027)
+train_split <- rsample::initial_split(baked_train, prop = 0.3, strata = "popularity")
+baked_train_subset <- rsample::training(train_split)
+```
+
+```{r}
+set.seed(7027)
+svm_linear <- tune(svm, popularity~., data = baked_train_subset, kernel = "linear", ranges = list(cost = c(0.1,1,5)))
+```
+
+```{r}
+svm_linear_opt <- svm_linear$best.model
+summary(svm_linear_opt)
+```
+
+optimal SVM linear model:
+```{r}
+svm_linear_opt <- svm(popularity~., data=baked_train, kernal="linear", cost=0.1)
+```
+
+```{r}
+svm_linear$best.performance
+```
+
+training set:
+```{r}
+predict.svm_linear_train <- predict(svm_linear_opt, baked_train)
+confusionMatrix(predict.svm_linear_train, baked_train$popularity)
+```
+
+testing set:
+```{r}
+predict.svm_linear_test <- predict(svm_linear_opt, baked_test)
+confusionMatrix(predict.svm_linear_test, baked_test$popularity)
+```
+
+
+## (2)  support vector machine with a radial kernel
+```{r}
+set.seed(7027)
+split <- rsample::initial_split(baked_train, prop = 0.3, strata = "popularity")
+baked_train_subset <- rsample::training(split)
+```
+
+
+```{r}
+set.seed(7027)
+svm_radial <- tune(svm, popularity~., data = baked_train_subset, kernel = "radial",
+                 ranges = list(cost = c(0.01, 0.1, 1, 5), 
+                               gamma = c(0.5, 1, 2))
+                 )
+summary(svm_radial)
+```
+
+```{r}
+svm_radial_opt <- svm_radial$best.model
+summary(svm_radial_opt)
+```
+
+optimal SVM radial model:
+```{r}
+svm_radial_opt <- svm(popularity~., data=baked_train, method="C-classification", kernal="radial", cost=1, gamma = 0.5)
+```
+
+training set:
+```{r}
+predict.svm_radial_train <- predict(svm_radial_opt, baked_train)
+confusionMatrix(predict.svm_radial_train, baked_train$popularity)
+```
+
+testing set:
+```{r}
+predict.svm_radial_test <- predict(svm_radial_opt, baked_test)
+confusionMatrix(predict.svm_radial_test, baked_test$popularity)
+```

@@ -1,0 +1,137 @@
+---
+title: "KNN"
+author: "Wang Xuerui"
+date: "12/17/2021"
+output:
+  html_document:
+    code_folding: show
+    highlight: haddock
+    theme: lumen
+    toc: yes
+    toc_depth: 4
+    toc_float: yes
+  word_document:
+    toc: yes
+    toc_depth: '4'
+  pdf_document:
+    toc: yes
+    toc_depth: '4'
+---
+
+```{r}
+# Helper packages
+library(dplyr)      # for data wrangling
+library(ggplot2)    # for awesome graphics
+library(rsample)    # for creating validation splits
+library(recipes)    # for feature engineering
+
+# Modeling packages
+library(caret)       # for fitting KNN models
+library(gmodels)     # Cross Table Function
+library(FNN)
+library(kernlab)   # for fitting SVM linear models
+```
+
+
+```{r}
+# read data
+news <- read.csv('OnlineNewsPopularity_label.csv')
+news <- news[, c(1:37, 60)]
+news$popularity <- factor(news$popularity, levels = c("Very Poor", "Poor", "Average", "Good", "Very Good", "Excellent", "Exceptional"))
+for(i in 12:17) {news[,i] <- as.factor(news[,i])}
+for(j in 30:37) {news[,j] <- as.factor(news[,j])}
+news <- news[-31038,]
+head(news)
+```
+
+# 1. sampling
+
+```{r}
+set.seed(7027)  # for reproducibility
+split <- rsample::initial_split(news, prop = 0.7, strata = "popularity")
+news_train <- rsample::training(split)
+news_test <- rsample::testing(split)
+```
+
+# 2. Feature engineering
+
+```{r}
+blueprint <- recipe(popularity ~ ., data = news_train) %>% 
+  step_nzv(all_nominal()) %>% 
+  step_center(all_numeric(), -all_outcomes()) %>% 
+  step_scale(all_numeric(), -all_outcomes()) %>%
+  step_integer(c(12:17,30:37))
+
+prepare <- prep(blueprint, training = news_train)
+
+baked_train <- bake(prepare, new_data = news_train)
+baked_test <- bake(prepare, new_data = news_test)
+```
+
+# 3. KNN
+## (1) Create a resampling method
+```{r}
+cv <- trainControl(
+  method = "repeatedcv", 
+  number = 10, 
+  repeats = 5,
+  savePredictions = TRUE
+)
+```
+
+## (2) Create a hyperparameter grid search
+```{r}
+hyper_grid_knn <- expand.grid(k = seq(250, 350, by = 10))
+```
+
+## (3) Execute grid search
+```{r}
+set.seed(7027) 
+knn_news <- train(
+  blueprint,
+  data = news_train,
+  method = "knn",
+  tuneGrid = hyper_grid_knn,
+  trControl = cv
+)
+```
+
+```{r}
+ggplot(knn_news)
+```
+
+best K is 300.
+
+```{r}
+# Create confusion matrix
+cm_knn <- confusionMatrix(knn_news$pred$pred, knn_news$pred$obs)
+cm_knn$byClass[, c(1:2, 11)]  # sensitivity, specificity, & accuracy
+```
+
+
+```{r}
+vi <- varImp(knn_news)
+vi
+```
+
+
+## (4) predicted result for testing set of optimal KNN
+```{r}
+baked_train_feature <- as.data.frame(baked_train[ ,1:37])
+baked_train_label <- as.data.frame(baked_train[ ,38])
+baked_test_feature <- as.data.frame(baked_test[ ,1:37])
+baked_test_label <- as.data.frame(baked_test[ ,38])
+```
+
+```{r}
+predict_test_knn <- knn(train = baked_train_feature, test = baked_test_feature, cl = baked_train_label$popularity, k = 300) 
+```
+
+```{r}
+confusionMatrix(predict_test_knn, baked_test_label$popularity)
+```
+
+```{r}
+# contingency table
+CrossTable(x = baked_test_label$popularity, y = predict_test_knn, prop.chisq = FALSE)
+```
